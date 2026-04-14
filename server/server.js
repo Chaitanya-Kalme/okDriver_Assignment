@@ -1,53 +1,30 @@
-import { WebSocketServer, WebSocket } from "ws";
+const WebSocket = require("ws");
 
-const wss = new WebSocketServer({ port: 3000 });
+const wss = new WebSocket.Server({ port: 8080 });
 
-let viewers = [];
-let streamer = null;
+const rooms = {};
 
 wss.on("connection", (ws) => {
-  console.log("New client connected");
+  ws.on("message", (msg) => {
+    const data = JSON.parse(msg);
+    const { room } = data;
 
-  ws.on("message", (message) => {
-    try {
-      const data = JSON.parse(message);
+    if (!rooms[room]) rooms[room] = [];
+    if (!rooms[room].includes(ws)) rooms[room].push(ws);
 
-      if (data.type === "register" && data.role === "streamer") {
-        streamer = ws;
-        console.log("📱 Mobile camera connected");
-        return;
+    // broadcast to other peer in same room
+    rooms[room].forEach((client) => {
+      if (client !== ws && client.readyState === 1) {
+        client.send(JSON.stringify(data));
       }
-
-      if (data.type === "register" && data.role === "viewer") {
-        viewers.push(ws);
-        console.log("🖥️ Viewer connected. Total:", viewers.length);
-        return;
-      }
-
-      if (data.type === "frame") {
-        viewers.forEach(viewer => {
-          if (viewer.readyState === WebSocket.OPEN) {
-            viewer.send(message.toString());
-          }
-        });
-      }
-
-    } catch (err) {
-      console.error("Error:", err);
-    }
+    });
   });
 
   ws.on("close", () => {
-    if (ws === streamer) {
-      streamer = null;
-      console.log("📱 Mobile disconnected");
-    } else {
-      viewers = viewers.filter(v => v !== ws);
-      console.log("🖥️ Viewer disconnected");
-    }
+    Object.keys(rooms).forEach((room) => {
+      rooms[room] = rooms[room].filter((c) => c !== ws);
+    });
   });
-
-  ws.on("error", (err) => console.error("WebSocket error:", err));
 });
 
-console.log("✅ WebSocket server running on ws://0.0.0.0:3000");
+console.log("Signaling server running on ws://localhost:8080");
