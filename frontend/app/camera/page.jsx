@@ -116,15 +116,37 @@ export default function CameraPage() {
     setStatus("Stopped");
   }
 
-  // ✅ FIXED camera switching
   async function switchCamera() {
     const next = facingMode === "environment" ? "user" : "environment";
     setFacingMode(next);
 
     try {
-      const newStream = await getCameraStream(next);
+      // 1. Stop old stream FIRST (important)
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+      }
+
+      // 2. Small delay (VERY IMPORTANT for mobile)
+      await new Promise((res) => setTimeout(res, 300));
+
+      // 3. Get new stream (force correct camera)
+      let newStream;
+      try {
+        newStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { exact: next } },
+          audio: false,
+        });
+      } catch {
+        newStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: next },
+          audio: false,
+        });
+      }
+
       const newTrack = newStream.getVideoTracks()[0];
 
+      // 4. Replace track in WebRTC
       const sender = pcRef.current
         ?.getSenders()
         .find((s) => s.track?.kind === "video");
@@ -133,14 +155,13 @@ export default function CameraPage() {
         await sender.replaceTrack(newTrack);
       }
 
-      // stop old stream
-      streamRef.current?.getTracks().forEach((t) => t.stop());
-
-      streamRef.current = newStream;
-
+      // 5. Update video element
       if (videoRef.current) {
+        videoRef.current.srcObject = null; // force refresh
         videoRef.current.srcObject = newStream;
       }
+
+      streamRef.current = newStream;
 
     } catch (err) {
       console.error("Switch camera error:", err);
