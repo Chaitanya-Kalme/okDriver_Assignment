@@ -1,58 +1,85 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 
+const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:5000";
+
 export default function CameraPage() {
   const videoRef = useRef(null);
   const [status, setStatus] = useState("Not connected");
   const [streaming, setStreaming] = useState(false);
+  const [facingMode, setFacingMode] = useState("environment"); // rear camera default
   const wsRef = useRef(null);
-  const intervalRef = useRef(null);
-
-  // 🔴 Replace with your laptop's IP
-  const WS_URL = process.env.NEXT_PUBLIC_WS_URL;
+  const pcRef = useRef(null);
+  const streamRef = useRef(null);
 
   async function startStreaming() {
     try {
-      // 1. Get camera stream
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment" }, // back camera
+        video: { facingMode },
         audio: false,
       });
 
-      videoRef.current.srcObject = stream;
+      streamRef.current = stream;
+      if (videoRef.current) videoRef.current.srcObject = stream;
 
-      // 2. Connect to WebSocket
       const ws = new WebSocket(WS_URL);
       wsRef.current = ws;
 
-      ws.onopen = () => {
+      const pc = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      });
+      pcRef.current = pc;
+
+      stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "candidate", data: event.candidate }));
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === "connected") setStatus("📡 Streaming via WebRTC");
+        if (pc.connectionState === "failed") setStatus("❌ Connection failed");
+      };
+
+      ws.onopen = async () => {
         ws.send(JSON.stringify({ type: "register", role: "streamer" }));
-        setStatus("✅ Connected & Streaming!");
-        setStreaming(true);
 
-        // 3. Send frames
-        const canvas = document.createElement("canvas");
-        canvas.width = 640;
-        canvas.height = 480;
-        const ctx = canvas.getContext("2d");
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        ws.send(JSON.stringify({ type: "offer", data: offer }));
 
-        intervalRef.current = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-            const frame = canvas.toDataURL("image/jpeg", 0.6);
-            ws.send(JSON.stringify({ type: "frame", data: frame }));
+        setStatus("⏳ Waiting for viewer...");
+        setStreaming(true); // ← Fix: show Stop button
+      };
+
+      ws.onmessage = async (event) => {
+        let msg;
+        try {
+          msg = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+
+        if (msg.type === "answer") {
+          await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
+        }
+
+        if (msg.type === "candidate") {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(msg.data));
+          } catch (e) {
+            console.warn("ICE candidate error:", e);
           }
-        }, 100); // 10 FPS
+        }
       };
 
+      ws.onerror = () => setStatus("❌ WebSocket error");
       ws.onclose = () => {
-        setStatus("❌ Disconnected");
+        setStatus("⚠️ Disconnected");
         setStreaming(false);
-        clearInterval(intervalRef.current);
       };
-
-      ws.onerror = () => setStatus("❌ Connection error");
-
     } catch (err) {
       setStatus(`❌ Camera error: ${err.message}`);
     }
@@ -60,59 +87,91 @@ export default function CameraPage() {
 
   function stopStreaming() {
     wsRef.current?.close();
-    clearInterval(intervalRef.current);
-    if (videoRef.current?.srcObject) {
-      videoRef.current.srcObject.getTracks().forEach(t => t.stop());
-    }
+    pcRef.current?.close();
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    if (videoRef.current) videoRef.current.srcObject = null;
     setStreaming(false);
     setStatus("Stopped");
+  }
+
+  async function switchCamera() {
+    const next = facingMode === "environment" ? "user" : "environment";
+    setFacingMode(next);
+
+    if (!streaming) return;
+
+    // Replace track on existing connection
+    const newStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: next },
+      audio: false,
+    });
+
+    const [newTrack] = newStream.getVideoTracks();
+    const sender = pcRef.current
+      ?.getSenders()
+      .find((s) => s.track?.kind === "video");
+
+    if (sender) {
+      await sender.replaceTrack(newTrack);
+    }
+
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = newStream;
+    if (videoRef.current) videoRef.current.srcObject = newStream;
   }
 
   useEffect(() => {
     return () => {
       wsRef.current?.close();
-      clearInterval(intervalRef.current);
+      pcRef.current?.close();
+      streamRef.current?.getTracks().forEach((t) => t.stop());
     };
   }, []);
 
   return (
-    <div style={{ background: "#0f172a", minHeight: "100vh",
-                  display: "flex", flexDirection: "column",
-                  alignItems: "center", padding: "20px" }}>
+    <div style={{
+      background: "#0f172a", minHeight: "100vh",
+      display: "flex", flexDirection: "column",
+      alignItems: "center", padding: "20px", gap: "12px"
+    }}>
+      <h2 style={{ color: "white", margin: 0 }}>📱 Mobile Camera</h2>
+      <p style={{ color: "#22c55e", margin: 0 }}>{status}</p>
 
-      <h2 style={{ color: "white" }}>📱 Mobile Camera</h2>
-      <p style={{ color: "#22c55e" }}>{status}</p>
-
-      {/* Camera Preview */}
       <video
         ref={videoRef}
         autoPlay
         playsInline
         muted
-        style={{ width: "100%", maxWidth: "400px",
-                 borderRadius: "10px", background: "#1e293b" }}
+        style={{
+          width: "100%", maxWidth: "400px",
+          borderRadius: "10px", background: "#1e293b",
+          minHeight: "250px"
+        }}
       />
 
-      {/* Controls */}
-      <div style={{ display: "flex", gap: "10px", marginTop: "20px" }}>
+      <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", justifyContent: "center" }}>
         {!streaming ? (
-          <button
-            onClick={startStreaming}
-            style={{ padding: "15px 30px", fontSize: "16px",
-                     background: "#22c55e", color: "white",
-                     border: "none", borderRadius: "10px", cursor: "pointer" }}>
+          <button onClick={startStreaming} style={btnStyle("#22c55e")}>
             ▶ Start Streaming
           </button>
         ) : (
-          <button
-            onClick={stopStreaming}
-            style={{ padding: "15px 30px", fontSize: "16px",
-                     background: "#ef4444", color: "white",
-                     border: "none", borderRadius: "10px", cursor: "pointer" }}>
+          <button onClick={stopStreaming} style={btnStyle("#ef4444")}>
             ⏹ Stop Streaming
           </button>
         )}
+
+        <button onClick={switchCamera} style={btnStyle("#6366f1")}>
+          🔄 {facingMode === "environment" ? "Switch to Front" : "Switch to Rear"}
+        </button>
       </div>
     </div>
   );
+}
+
+function btnStyle(bg) {
+  return {
+    padding: "15px 30px", fontSize: "16px",
+    background: bg, color: "white",
+    border: "none", borderRadius: "10px", cursor: "pointer"
+  };
 }

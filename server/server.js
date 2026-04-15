@@ -1,30 +1,79 @@
 const WebSocket = require("ws");
 
-const wss = new WebSocket.Server({ port: 8080 });
+const wss = new WebSocket.Server({ port: 5000 });
 
-const rooms = {};
+let streamer = null;
+let viewers = new Set();
+let latestOffer = null; // buffer offer for late-joining viewers
+
+console.log("✅ Signaling server running on ws://localhost:5000");
 
 wss.on("connection", (ws) => {
-  ws.on("message", (msg) => {
-    const data = JSON.parse(msg);
-    const { room } = data;
+  console.log("🔌 New client connected");
 
-    if (!rooms[room]) rooms[room] = [];
-    if (!rooms[room].includes(ws)) rooms[room].push(ws);
+  // Single message handler — no duplicates
+  ws.on("message", (message) => {
+    let data;
+    try {
+      data = JSON.parse(message);
+    } catch {
+      console.warn("⚠️ Invalid JSON received");
+      return;
+    }
 
-    // broadcast to other peer in same room
-    rooms[room].forEach((client) => {
-      if (client !== ws && client.readyState === 1) {
-        client.send(JSON.stringify(data));
+    if (data.type === "register") {
+      if (data.role === "streamer") {
+        streamer = ws;
+        latestOffer = null; // reset on new streamer
+        console.log("📱 Streamer registered");
+      } else if (data.role === "viewer") {
+        viewers.add(ws);
+        console.log("🖥️ Viewer registered");
+        // Send buffered offer if streamer already sent one
+        if (latestOffer) {
+          ws.send(JSON.stringify({ type: "offer", data: latestOffer }));
+        }
       }
-    });
+      return;
+    }
+
+    if (data.type === "offer") {
+      latestOffer = data.data; // buffer it
+      viewers.forEach((v) => {
+        if (v.readyState === WebSocket.OPEN) {
+          v.send(JSON.stringify({ type: "offer", data: data.data }));
+        }
+      });
+    } else if (data.type === "answer") {
+      if (streamer && streamer.readyState === WebSocket.OPEN) {
+        streamer.send(JSON.stringify({ type: "answer", data: data.data }));
+      }
+    } else if (data.type === "candidate") {
+      if (ws === streamer) {
+        viewers.forEach((v) => {
+          if (v.readyState === WebSocket.OPEN) {
+            v.send(JSON.stringify({ type: "candidate", data: data.data }));
+          }
+        });
+      } else {
+        if (streamer && streamer.readyState === WebSocket.OPEN) {
+          streamer.send(JSON.stringify({ type: "candidate", data: data.data }));
+        }
+      }
+    } else {
+      console.log("⚠️ Unknown message type:", data.type);
+    }
   });
 
   ws.on("close", () => {
-    Object.keys(rooms).forEach((room) => {
-      rooms[room] = rooms[room].filter((c) => c !== ws);
-    });
+    if (ws === streamer) {
+      streamer = null;
+      latestOffer = null;
+      console.log("📱 Streamer disconnected");
+    }
+    viewers.delete(ws);
+    console.log("🔌 Client disconnected");
   });
-});
 
-console.log("Signaling server running on ws://localhost:8080");
+  ws.on("error", (err) => console.error("WebSocket error:", err));
+});
