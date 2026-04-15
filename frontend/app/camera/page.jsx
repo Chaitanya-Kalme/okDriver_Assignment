@@ -7,17 +7,30 @@ export default function CameraPage() {
   const videoRef = useRef(null);
   const [status, setStatus] = useState("Not connected");
   const [streaming, setStreaming] = useState(false);
-  const [facingMode, setFacingMode] = useState("environment"); // rear camera default
+  const [facingMode, setFacingMode] = useState("environment");
+
   const wsRef = useRef(null);
   const pcRef = useRef(null);
   const streamRef = useRef(null);
 
-  async function startStreaming() {
+  // ✅ FIXED: proper function with parameter + fallback
+  async function getCameraStream(mode) {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode },
+      return await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { exact: mode } },
         audio: false,
       });
+    } catch {
+      return await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: mode },
+        audio: false,
+      });
+    }
+  }
+
+  async function startStreaming() {
+    try {
+      const stream = await getCameraStream(facingMode);
 
       streamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
@@ -39,8 +52,12 @@ export default function CameraPage() {
       };
 
       pc.onconnectionstatechange = () => {
-        if (pc.connectionState === "connected") setStatus("📡 Streaming via WebRTC");
-        if (pc.connectionState === "failed") setStatus("❌ Connection failed");
+        if (pc.connectionState === "connected") {
+          setStatus("📡 Streaming via WebRTC");
+        }
+        if (pc.connectionState === "failed") {
+          setStatus("❌ Connection failed");
+        }
       };
 
       ws.onopen = async () => {
@@ -51,7 +68,7 @@ export default function CameraPage() {
         ws.send(JSON.stringify({ type: "offer", data: offer }));
 
         setStatus("⏳ Waiting for viewer...");
-        setStreaming(true); // ← Fix: show Stop button
+        setStreaming(true);
       };
 
       ws.onmessage = async (event) => {
@@ -70,54 +87,65 @@ export default function CameraPage() {
           try {
             await pc.addIceCandidate(new RTCIceCandidate(msg.data));
           } catch (e) {
-            console.warn("ICE candidate error:", e);
+            console.warn("ICE error:", e);
           }
         }
       };
 
       ws.onerror = () => setStatus("❌ WebSocket error");
+
       ws.onclose = () => {
         setStatus("⚠️ Disconnected");
         setStreaming(false);
       };
     } catch (err) {
-      setStatus(`❌ Camera error: ${err.message}`);
+      setStatus(`Camera error: ${err.message}`);
     }
   }
 
   function stopStreaming() {
     wsRef.current?.close();
     pcRef.current?.close();
+
     streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+
     if (videoRef.current) videoRef.current.srcObject = null;
+
     setStreaming(false);
     setStatus("Stopped");
   }
 
+  // ✅ FIXED camera switching
   async function switchCamera() {
     const next = facingMode === "environment" ? "user" : "environment";
     setFacingMode(next);
 
-    if (!streaming) return;
+    try {
+      const newStream = await getCameraStream(next);
+      const newTrack = newStream.getVideoTracks()[0];
 
-    // Replace track on existing connection
-    const newStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: next },
-      audio: false,
-    });
+      const sender = pcRef.current
+        ?.getSenders()
+        .find((s) => s.track?.kind === "video");
 
-    const [newTrack] = newStream.getVideoTracks();
-    const sender = pcRef.current
-      ?.getSenders()
-      .find((s) => s.track?.kind === "video");
+      if (sender) {
+        await sender.replaceTrack(newTrack);
+      }
 
-    if (sender) {
-      await sender.replaceTrack(newTrack);
+      // stop old stream
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+
+      streamRef.current = newStream;
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = newStream;
+      }
+
+    } catch (err) {
+      console.error("Switch camera error:", err);
+      setStatus("❌ Failed to switch camera");
     }
-
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = newStream;
-    if (videoRef.current) videoRef.current.srcObject = newStream;
   }
 
   useEffect(() => {
@@ -130,9 +158,13 @@ export default function CameraPage() {
 
   return (
     <div style={{
-      background: "#0f172a", minHeight: "100vh",
-      display: "flex", flexDirection: "column",
-      alignItems: "center", padding: "20px", gap: "12px"
+      background: "#0f172a",
+      minHeight: "100vh",
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      padding: "20px",
+      gap: "12px"
     }}>
       <h2 style={{ color: "white", margin: 0 }}>📱 Mobile Camera</h2>
       <p style={{ color: "#22c55e", margin: 0 }}>{status}</p>
@@ -143,8 +175,10 @@ export default function CameraPage() {
         playsInline
         muted
         style={{
-          width: "100%", maxWidth: "400px",
-          borderRadius: "10px", background: "#1e293b",
+          width: "100%",
+          maxWidth: "400px",
+          borderRadius: "10px",
+          background: "#1e293b",
           minHeight: "250px"
         }}
       />
@@ -170,8 +204,12 @@ export default function CameraPage() {
 
 function btnStyle(bg) {
   return {
-    padding: "15px 30px", fontSize: "16px",
-    background: bg, color: "white",
-    border: "none", borderRadius: "10px", cursor: "pointer"
+    padding: "15px 30px",
+    fontSize: "16px",
+    background: bg,
+    color: "white",
+    border: "none",
+    borderRadius: "10px",
+    cursor: "pointer"
   };
 }
