@@ -13,9 +13,8 @@ export default function ViewerPage() {
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
 
-    const pc = new RTCPeerConnection({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-    });
+    const pc = new RTCPeerConnection();
+    
     pcRef.current = pc;
 
     pc.ontrack = (event) => {
